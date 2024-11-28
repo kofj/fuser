@@ -6,7 +6,7 @@
 
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
-use libc::{c_int, ENOSYS};
+use libc::{c_int, ENOSYS, EPERM};
 use log::{debug, warn};
 use mnt::mount_options::parse_options_from_args;
 #[cfg(feature = "serializable")]
@@ -27,6 +27,10 @@ use crate::session::MAX_WRITE_SIZE;
 #[cfg(feature = "abi-7-16")]
 pub use ll::fuse_abi::fuse_forget_one;
 pub use mnt::mount_options::MountOption;
+#[cfg(feature = "abi-7-11")]
+pub use notify::{Notifier, PollHandle};
+#[cfg(feature = "abi-7-11")]
+pub use reply::ReplyPoll;
 #[cfg(target_os = "macos")]
 pub use reply::ReplyXTimes;
 pub use reply::ReplyXattr;
@@ -36,7 +40,7 @@ pub use reply::{
     ReplyStatfs, ReplyWrite,
 };
 pub use request::Request;
-pub use session::{BackgroundSession, Session};
+pub use session::{BackgroundSession, Session, SessionACL, SessionUnmounter};
 #[cfg(feature = "abi-7-28")]
 use std::cmp::max;
 #[cfg(feature = "abi-7-13")]
@@ -45,6 +49,8 @@ use std::cmp::min;
 mod channel;
 mod ll;
 mod mnt;
+#[cfg(feature = "abi-7-11")]
+mod notify;
 mod reply;
 mod request;
 mod session;
@@ -325,8 +331,11 @@ pub trait Filesystem {
     }
 
     /// Get file attributes.
-    fn getattr(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyAttr) {
-        warn!("[Not Implemented] getattr(ino: {:#x?})", ino);
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, fh: Option<u64>, reply: ReplyAttr) {
+        warn!(
+            "[Not Implemented] getattr(ino: {:#x?}, fh: {:#x?})",
+            ino, fh
+        );
         reply.error(ENOSYS);
     }
 
@@ -423,15 +432,15 @@ pub trait Filesystem {
         &mut self,
         _req: &Request<'_>,
         parent: u64,
-        name: &OsStr,
-        link: &Path,
+        link_name: &OsStr,
+        target: &Path,
         reply: ReplyEntry,
     ) {
         debug!(
-            "[Not Implemented] symlink(parent: {:#x?}, name: {:?}, link: {:?})",
-            parent, name, link,
+            "[Not Implemented] symlink(parent: {:#x?}, link_name: {:?}, target: {:?})",
+            parent, link_name, target,
         );
-        reply.error(ENOSYS);
+        reply.error(EPERM);
     }
 
     /// Rename a file.
@@ -466,7 +475,7 @@ pub trait Filesystem {
             "[Not Implemented] link(ino: {:#x?}, newparent: {:#x?}, newname: {:?})",
             ino, newparent, newname
         );
-        reply.error(ENOSYS);
+        reply.error(EPERM);
     }
 
     /// Open a file.
@@ -868,6 +877,25 @@ pub trait Filesystem {
         reply.error(ENOSYS);
     }
 
+    /// Poll for events
+    #[cfg(feature = "abi-7-11")]
+    fn poll(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        fh: u64,
+        ph: PollHandle,
+        events: u32,
+        flags: u32,
+        reply: ReplyPoll,
+    ) {
+        debug!(
+            "[Not Implemented] poll(ino: {:#x?}, fh: {}, ph: {:?}, events: {}, flags: {})",
+            ino, fh, ph, events, flags
+        );
+        reply.error(ENOSYS);
+    }
+
     /// Preallocate or deallocate space to a file
     fn fallocate(
         &mut self,
@@ -997,11 +1025,7 @@ pub fn mount2<FS: Filesystem, P: AsRef<Path>>(
 /// and therefore returns immediately. The returned handle should be stored
 /// to reference the mounted filesystem. If it's dropped, the filesystem will
 /// be unmounted.
-///
-/// # Safety
-///
-/// This interface is inherently unsafe if the BackgroundSession is allowed to leak without being
-/// dropped. See rust-lang/rust#24292 for more details.
+#[deprecated(note = "use spawn_mount2() instead")]
 pub fn spawn_mount<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
     filesystem: FS,
     mountpoint: P,
@@ -1013,4 +1037,20 @@ pub fn spawn_mount<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
         .collect();
     let options = options.ok_or(ErrorKind::InvalidData)?;
     Session::new(filesystem, mountpoint.as_ref(), options.as_ref()).and_then(|se| se.spawn())
+}
+
+/// Mount the given filesystem to the given mountpoint. This function spawns
+/// a background thread to handle filesystem operations while being mounted
+/// and therefore returns immediately. The returned handle should be stored
+/// to reference the mounted filesystem. If it's dropped, the filesystem will
+/// be unmounted.
+///
+/// NOTE: This is the corresponding function to mount2.
+pub fn spawn_mount2<'a, FS: Filesystem + Send + 'static + 'a, P: AsRef<Path>>(
+    filesystem: FS,
+    mountpoint: P,
+    options: &[MountOption],
+) -> io::Result<BackgroundSession> {
+    check_option_conflicts(options)?;
+    Session::new(filesystem, mountpoint.as_ref(), options).and_then(|se| se.spawn())
 }

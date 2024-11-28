@@ -19,6 +19,8 @@ use crate::reply::ReplyDirectoryPlus;
 use crate::reply::{Reply, ReplyDirectory, ReplySender};
 use crate::session::{Session, SessionACL};
 use crate::Filesystem;
+#[cfg(feature = "abi-7-11")]
+use crate::PollHandle;
 use crate::{ll, KernelConfig};
 
 /// Request data structure
@@ -27,6 +29,7 @@ pub struct Request<'a> {
     /// Channel sender for sending the reply
     ch: ChannelSender,
     /// Request raw data
+    #[allow(unused)]
     data: &'a [u8],
     /// Parsed request
     request: ll::AnyRequest<'a>,
@@ -68,7 +71,7 @@ impl<'a> Request<'a> {
     fn dispatch_req<FS: Filesystem>(
         &self,
         se: &mut Session<FS>,
-    ) -> Result<Option<Response>, Errno> {
+    ) -> Result<Option<Response<'_>>, Errno> {
         let op = self.request.operation().map_err(|_| Errno::ENOSYS)?;
         // Implement allow_root & access check for auto_unmount
         if (se.allowed == SessionACL::RootAndOwner
@@ -196,7 +199,7 @@ impl<'a> Request<'a> {
                 se.filesystem.lookup(
                     self,
                     self.request.nodeid().into(),
-                    &x.name().as_ref(),
+                    x.name().as_ref(),
                     self.reply(),
                 );
             }
@@ -204,9 +207,19 @@ impl<'a> Request<'a> {
                 se.filesystem
                     .forget(self, self.request.nodeid().into(), x.nlookup()); // no reply
             }
-            ll::Operation::GetAttr(_) => {
+            ll::Operation::GetAttr(_attr) => {
+                #[cfg(feature = "abi-7-9")]
+                se.filesystem.getattr(
+                    self,
+                    self.request.nodeid().into(),
+                    _attr.file_handle().map(|fh| fh.into()),
+                    self.reply(),
+                );
+
+                // Pre-abi-7-9 does not support providing a file handle.
+                #[cfg(not(feature = "abi-7-9"))]
                 se.filesystem
-                    .getattr(self, self.request.nodeid().into(), self.reply());
+                    .getattr(self, self.request.nodeid().into(), None, self.reply());
             }
             ll::Operation::SetAttr(x) => {
                 se.filesystem.setattr(
@@ -272,8 +285,8 @@ impl<'a> Request<'a> {
                 se.filesystem.symlink(
                     self,
                     self.request.nodeid().into(),
-                    x.target().as_ref(),
-                    &Path::new(x.link()),
+                    x.link_name().as_ref(),
+                    Path::new(x.target()),
                     self.reply(),
                 );
             }
@@ -510,9 +523,18 @@ impl<'a> Request<'a> {
                 }
             }
             #[cfg(feature = "abi-7-11")]
-            ll::Operation::Poll(_) => {
-                // TODO: handle FUSE_POLL
-                return Err(Errno::ENOSYS);
+            ll::Operation::Poll(x) => {
+                let ph = PollHandle::new(se.ch.sender(), x.kernel_handle());
+
+                se.filesystem.poll(
+                    self,
+                    self.request.nodeid().into(),
+                    x.file_handle().into(),
+                    ph,
+                    x.events(),
+                    x.flags(),
+                    self.reply(),
+                );
             }
             #[cfg(feature = "abi-7-15")]
             ll::Operation::NotifyReply(_) => {
@@ -593,9 +615,9 @@ impl<'a> Request<'a> {
                 se.filesystem.setvolname(self, x.name(), self.reply());
             }
             #[cfg(target_os = "macos")]
-            ll::Operation::GetXTimes(_) => {
+            ll::Operation::GetXTimes(x) => {
                 se.filesystem
-                    .getxtimes(self, self.request.nodeid().into(), self.reply());
+                    .getxtimes(self, x.nodeid().into(), self.reply());
             }
             #[cfg(target_os = "macos")]
             ll::Operation::Exchange(x) => {

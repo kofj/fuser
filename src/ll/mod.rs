@@ -2,15 +2,15 @@
 
 mod argument;
 pub mod fuse_abi;
+#[cfg(feature = "abi-7-11")]
+pub(crate) mod notify;
 pub(crate) mod reply;
 mod request;
 
 use std::{convert::TryInto, num::NonZeroI32, time::SystemTime};
 
 pub use reply::Response;
-pub use request::{
-    AnyRequest, FileHandle, INodeNo, Lock, Operation, Request, RequestError, RequestId, Version,
-};
+pub use request::{AnyRequest, FileHandle, INodeNo, Lock, Operation, Request, RequestId, Version};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 /// Possible input arguments for atime & mtime, which can either be set to a specified time,
@@ -32,7 +32,7 @@ macro_rules! errno {
             } as usize] = [];
             // Which makes this safe
             NonZeroI32::new_unchecked($x)
-        });
+        })
     };
 }
 
@@ -267,6 +267,7 @@ impl From<Generation> for u64 {
 
 #[cfg(test)]
 mod test {
+    use std::io::IoSlice;
     use std::ops::{Deref, DerefMut};
     /// If we want to be able to cast bytes to our fuse C struct types we need it
     /// to be aligned.  This struct helps getting &[u8]s which are 8 byte aligned.
@@ -284,5 +285,13 @@ mod test {
         fn deref_mut(&mut self) -> &mut Self::Target {
             &mut self.0
         }
+    }
+
+    pub fn ioslice_to_vec(s: &[IoSlice<'_>]) -> Vec<u8> {
+        let mut v = Vec::with_capacity(s.iter().map(|x| x.len()).sum());
+        for x in s {
+            v.extend_from_slice(x);
+        }
+        v
     }
 }

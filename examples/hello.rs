@@ -1,4 +1,4 @@
-use clap::{crate_version, App, Arg};
+use clap::{crate_version, Arg, ArgAction, Command};
 use fuser::{
     FileAttr, FileType, Filesystem, MountOption, ReplyAttr, ReplyData, ReplyDirectory, ReplyEntry,
     Request,
@@ -58,7 +58,7 @@ impl Filesystem for HelloFS {
         }
     }
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+    fn getattr(&mut self, _req: &Request, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
         match ino {
             1 => reply.attr(&TTL, &HELLO_DIR_ATTR),
             2 => reply.attr(&TTL, &HELLO_TXT_ATTR),
@@ -114,33 +114,35 @@ impl Filesystem for HelloFS {
 }
 
 fn main() {
-    let matches = App::new("hello")
+    let matches = Command::new("hello")
         .version(crate_version!())
         .author("Christopher Berner")
         .arg(
-            Arg::with_name("MOUNT_POINT")
+            Arg::new("MOUNT_POINT")
                 .required(true)
                 .index(1)
                 .help("Act as a client, and mount FUSE at given path"),
         )
         .arg(
-            Arg::with_name("auto_unmount")
+            Arg::new("auto_unmount")
                 .long("auto_unmount")
+                .action(ArgAction::SetTrue)
                 .help("Automatically unmount on process exit"),
         )
         .arg(
-            Arg::with_name("allow-root")
+            Arg::new("allow-root")
                 .long("allow-root")
+                .action(ArgAction::SetTrue)
                 .help("Allow root user to access filesystem"),
         )
         .get_matches();
     env_logger::init();
-    let mountpoint = matches.value_of("MOUNT_POINT").unwrap();
+    let mountpoint = matches.get_one::<String>("MOUNT_POINT").unwrap();
     let mut options = vec![MountOption::RO, MountOption::FSName("hello".to_string())];
-    if matches.is_present("auto_unmount") {
+    if matches.get_flag("auto_unmount") {
         options.push(MountOption::AutoUnmount);
     }
-    if matches.is_present("allow-root") {
+    if matches.get_flag("allow-root") {
         options.push(MountOption::AllowRoot);
     }
     fuser::mount2(HelloFS, mountpoint, &options).unwrap();

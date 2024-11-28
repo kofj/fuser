@@ -12,19 +12,19 @@ use crate::FileType;
 use super::{fuse_abi as abi, Errno, FileHandle, Generation, INodeNo};
 use super::{Lock, RequestId};
 use smallvec::{smallvec, SmallVec};
-use zerocopy::AsBytes;
+use zerocopy::{Immutable, IntoBytes};
 
 const INLINE_DATA_THRESHOLD: usize = size_of::<u64>() * 4;
 pub(crate) type ResponseBuf = SmallVec<[u8; INLINE_DATA_THRESHOLD]>;
 
 #[derive(Debug)]
-pub enum Response {
+pub enum Response<'a> {
     Error(i32),
     Data(ResponseBuf),
+    Slice(&'a [u8]),
 }
 
-#[must_use]
-impl Response {
+impl<'a> Response<'a> {
     pub(crate) fn with_iovec<F: FnOnce(&[IoSlice<'_>]) -> T, T>(
         &self,
         unique: RequestId,
@@ -33,6 +33,7 @@ impl Response {
         let datalen = match &self {
             Response::Error(_) => 0,
             Response::Data(v) => v.len(),
+            Response::Slice(d) => d.len(),
         };
         let header = abi::fuse_out_header {
             unique: unique.0,
@@ -48,7 +49,8 @@ impl Response {
         let mut v: SmallVec<[IoSlice<'_>; 3]> = smallvec![IoSlice::new(header.as_bytes())];
         match &self {
             Response::Error(_) => {}
-            Response::Data(d) => v.push(IoSlice::new(d.as_ref())),
+            Response::Data(d) => v.push(IoSlice::new(d)),
+            Response::Slice(d) => v.push(IoSlice::new(d)),
         }
         f(&v)
     }
@@ -64,10 +66,14 @@ impl Response {
 
     pub(crate) fn new_data<T: AsRef<[u8]> + Into<Vec<u8>>>(data: T) -> Self {
         Self::Data(if data.as_ref().len() <= INLINE_DATA_THRESHOLD {
-            data.as_ref().into()
+            ResponseBuf::from_slice(data.as_ref())
         } else {
-            data.into().into()
+            ResponseBuf::from_vec(data.into())
         })
+    }
+
+    pub(crate) fn new_slice(data: &'a [u8]) -> Self {
+        Self::Slice(data)
     }
 
     pub(crate) fn new_entry(
@@ -212,11 +218,20 @@ impl Response {
             out_iovs: if !data.is_empty() { 1 } else { 0 },
         };
         // TODO: Don't copy this data
-        let mut v: ResponseBuf = r.as_bytes().into();
+        let mut v: ResponseBuf = ResponseBuf::from_slice(r.as_bytes());
         for x in data {
             v.extend_from_slice(x)
         }
         Self::Data(v)
+    }
+
+    #[cfg(feature = "abi-7-11")]
+    pub(crate) fn new_poll(revents: u32) -> Self {
+        let r = abi::fuse_poll_out {
+            revents,
+            padding: 0,
+        };
+        Self::from_struct(&r)
     }
 
     fn new_directory(list: EntListBuf) -> Self {
@@ -234,8 +249,8 @@ impl Response {
         Self::from_struct(&r)
     }
 
-    fn from_struct<T: AsBytes + ?Sized>(data: &T) -> Self {
-        Self::Data(data.as_bytes().into())
+    fn from_struct<T: IntoBytes + Immutable + ?Sized>(data: &T) -> Self {
+        Self::Data(SmallVec::from_slice(data.as_bytes()))
     }
 }
 
@@ -252,6 +267,7 @@ pub(crate) fn time_from_system_time(system_time: &SystemTime) -> (i64, u32) {
 // Some platforms like Linux x86_64 have mode_t = u32, and lint warns of a trivial_numeric_casts.
 // But others like macOS x86_64 have mode_t = u16, requiring a typecast.  So, just silence lint.
 #[allow(trivial_numeric_casts)]
+#[allow(clippy::unnecessary_cast)]
 /// Returns the mode for a given file kind and permission
 pub(crate) fn mode_from_kind_and_perm(kind: FileType, perm: u16) -> u32 {
     (match kind {
@@ -382,7 +398,7 @@ impl<T: AsRef<Path>> DirEntry<T> {
 /// Used to respond to [ReadDirPlus] requests.
 #[derive(Debug)]
 pub struct DirEntList(EntListBuf);
-impl From<DirEntList> for Response {
+impl From<DirEntList> for Response<'_> {
     fn from(l: DirEntList) -> Self {
         assert!(l.0.buf.len() <= l.0.max_size);
         Response::new_directory(l.0)
@@ -411,6 +427,7 @@ impl DirEntList {
 
 #[derive(Debug)]
 pub struct DirEntryPlus<T: AsRef<Path>> {
+    #[allow(unused)] // We use `attr.ino` instead
     ino: INodeNo,
     generation: Generation,
     offset: DirEntOffset,
@@ -445,7 +462,7 @@ impl<T: AsRef<Path>> DirEntryPlus<T> {
 /// Used to respond to [ReadDir] requests.
 #[derive(Debug)]
 pub struct DirEntPlusList(EntListBuf);
-impl From<DirEntPlusList> for Response {
+impl From<DirEntPlusList> for Response<'_> {
     fn from(l: DirEntPlusList) -> Self {
         assert!(l.0.buf.len() <= l.0.max_size);
         Response::new_directory(l.0)
@@ -487,6 +504,7 @@ impl DirEntPlusList {
 mod test {
     use std::num::NonZeroI32;
 
+    use super::super::test::ioslice_to_vec;
     use super::*;
 
     #[test]
@@ -855,18 +873,10 @@ mod test {
             FileType::RegularFile,
             "world.rs"
         )));
-        let r: Response = buf.into();
+        let r: Response<'_> = buf.into();
         assert_eq!(
             r.with_iovec(RequestId(0xdeadbeef), ioslice_to_vec),
             expected
         );
-    }
-
-    fn ioslice_to_vec(s: &[IoSlice<'_>]) -> Vec<u8> {
-        let mut v = Vec::with_capacity(s.iter().map(|x| x.len()).sum());
-        for x in s {
-            v.extend_from_slice(x);
-        }
-        v
     }
 }

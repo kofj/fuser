@@ -2,7 +2,7 @@ use super::fuse3_sys::{
     fuse_session_destroy, fuse_session_fd, fuse_session_mount, fuse_session_new,
     fuse_session_unmount,
 };
-use super::{ensure_last_os_error, with_fuse_args, MountOption};
+use super::{with_fuse_args, MountOption};
 use std::{
     ffi::{c_void, CString},
     fs::File,
@@ -12,6 +12,15 @@ use std::{
     ptr,
     sync::Arc,
 };
+
+/// Ensures that an os error is never 0/Success
+fn ensure_last_os_error() -> io::Error {
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(0) => io::Error::new(io::ErrorKind::Other, "Unspecified Error"),
+        _ => err,
+    }
+}
 
 #[derive(Debug)]
 pub struct Mount {
@@ -36,10 +45,7 @@ impl Mount {
             }
             // We dup the fd here as the existing fd is owned by the fuse_session, and we
             // don't want it being closed out from under us:
-            let fd = unsafe { libc::dup(fd) };
-            if fd < 0 {
-                return Err(io::Error::last_os_error());
-            }
+            let fd = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(0))?;
             let file = unsafe { File::from_raw_fd(fd) };
             Ok((Arc::new(file), mount))
         })

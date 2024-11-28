@@ -9,6 +9,15 @@ use std::{
     sync::Arc,
 };
 
+/// Ensures that an os error is never 0/Success
+fn ensure_last_os_error() -> io::Error {
+    let err = io::Error::last_os_error();
+    match err.raw_os_error() {
+        Some(0) => io::Error::new(io::ErrorKind::Other, "Unspecified Error"),
+        _ => err,
+    }
+}
+
 #[derive(Debug)]
 pub struct Mount {
     mountpoint: CString,
@@ -19,7 +28,7 @@ impl Mount {
         with_fuse_args(options, |args| {
             let fd = unsafe { fuse_mount_compat25(mountpoint.as_ptr(), args) };
             if fd < 0 {
-                Err(io::Error::last_os_error())
+                Err(ensure_last_os_error())
             } else {
                 let file = unsafe { File::from_raw_fd(fd) };
                 Ok((Arc::new(file), Mount { mountpoint }))
@@ -46,7 +55,6 @@ impl Drop for Mount {
                     target_os = "freebsd",
                     target_os = "dragonfly",
                     target_os = "openbsd",
-                    target_os = "bitrig",
                     target_os = "netbsd"
                 )))]
                 unsafe {
