@@ -1,6 +1,6 @@
 # FUSE (Filesystem in Userspace) for Rust
 
-[![Build Status](https://travis-ci.com/cberner/fuser.svg?branch=master)](https://travis-ci.com/cberner/fuser)
+![CI](https://github.com/cberner/fuser/actions/workflows/ci.yml/badge.svg)
 [![Crates.io](https://img.shields.io/crates/v/fuser.svg)](https://crates.io/crates/fuser)
 [![Documentation](https://docs.rs/fuser/badge.svg)](https://docs.rs/fuser)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/cberner/fuser/blob/master/LICENSE.md)
@@ -42,7 +42,7 @@ To build FUSE-Rust or any program that depends on it, `pkg-config` needs to be i
 [FUSE for Linux] is available in most Linux distributions and usually called `fuse` or `fuse3` (this crate is compatible with both). To install on a Debian based system:
 
 ```sh
-sudo apt-get install fuse
+sudo apt-get install fuse3 libfuse3-dev
 ```
 
 Install on CentOS:
@@ -61,7 +61,7 @@ sudo apt-get install libfuse-dev pkg-config
 sudo yum install fuse-devel pkgconfig
 ```
 
-### macOS
+### macOS (untested)
 
 Installer packages can be downloaded from the [FUSE for macOS homepage][FUSE for macOS]. This is the *kernel* part that needs to be installed always.
 
@@ -114,7 +114,11 @@ Most features of libfuse up to 3.10.3 are implemented. Feel free to contribute. 
 
 ## Compatibility
 
-Developed and tested on Linux. Tested under [Linux][FUSE for Linux], [macOS][FUSE for macOS] (up to ABI 7.19) and [FreeBSD][FUSE for FreeBSD] using stable [Rust] (see CI for details).
+Developed and tested on Linux. Tested under [Linux][FUSE for Linux] and [FreeBSD][FUSE for FreeBSD] using stable [Rust] (see CI for details).
+
+## License
+
+Licensed under [MIT License](LICENSE.md), except for those files in `examples/` that explicitly contain a different license.
 
 ## Contribution
 

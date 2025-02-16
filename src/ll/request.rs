@@ -4,6 +4,7 @@
 //! perform.
 
 use super::fuse_abi::{fuse_in_header, fuse_opcode, InvalidOpcodeError};
+
 use super::{fuse_abi as abi, Errno, Response};
 #[cfg(feature = "serializable")]
 use serde::{Deserialize, Serialize};
@@ -102,9 +103,9 @@ impl From<INodeNo> for u64 {
 /// the same [FileHandle], just as a single INode can have multiple
 /// [FileHandle]s open at one time.  Every time a single file-descriptor is
 /// closed a [Flush] request is made.  This gives filesystem implementations
-/// an oppertunity to return an error message from that `close()` call.  After
+/// an opportunity to return an error message from that `close()` call.  After
 /// all the file-descriptors are closed that own a given [FileHandle] the
-/// [Release]/[ReleaseDir] request will be made.  This is an oppertunity for
+/// [Release]/[ReleaseDir] request will be made.  This is an opportunity for
 /// the filesystem implementation to free any internal per-FileHandle data
 /// structures it has allocated.
 ///
@@ -193,13 +194,12 @@ impl fmt::Display for RequestError {
         match self {
             RequestError::ShortReadHeader(len) => write!(
                 f,
-                "Short read of FUSE request header ({} < {})",
-                len,
+                "Short read of FUSE request header ({len} < {})",
                 mem::size_of::<fuse_in_header>()
             ),
-            RequestError::UnknownOperation(opcode) => write!(f, "Unknown FUSE opcode ({})", opcode),
+            RequestError::UnknownOperation(opcode) => write!(f, "Unknown FUSE opcode ({opcode})"),
             RequestError::ShortRead(len, total) => {
-                write!(f, "Short read of FUSE request ({} < {})", len, total)
+                write!(f, "Short read of FUSE request ({len} < {total})")
             }
             RequestError::InsufficientData => write!(f, "Insufficient argument data"),
         }
@@ -228,7 +228,7 @@ pub trait Request: Sized {
     fn pid(&self) -> u32;
 
     /// Create an error response for this Request
-    fn reply_err(&self, errno: Errno) -> Response {
+    fn reply_err(&self, errno: Errno) -> Response<'_> {
         Response::new_error(errno)
     }
 }
@@ -282,7 +282,7 @@ mod op {
         path::Path,
         time::{Duration, SystemTime},
     };
-    use zerocopy::AsBytes;
+    use zerocopy::IntoBytes;
 
     /// Look up a directory entry by name and get its attributes.
     ///
@@ -329,8 +329,22 @@ mod op {
     #[derive(Debug)]
     pub struct GetAttr<'a> {
         header: &'a fuse_in_header,
+
+        #[cfg(feature = "abi-7-9")]
+        arg: &'a fuse_getattr_in,
     }
     impl_request!(GetAttr<'_>);
+
+    #[cfg(feature = "abi-7-9")]
+    impl<'a> GetAttr<'a> {
+        pub fn file_handle(&self) -> Option<FileHandle> {
+            if self.arg.getattr_flags & crate::FUSE_GETATTR_FH != 0 {
+                Some(FileHandle(self.arg.fh))
+            } else {
+                None
+            }
+        }
+    }
 
     /// Set file attributes.
     #[derive(Debug)]
@@ -413,6 +427,10 @@ mod op {
             #[cfg(target_os = "macos")]
             match self.arg.valid & FATTR_CRTIME {
                 0 => None,
+                // During certain operation, macOS use some helper that send request to the mountpoint with `crtime` set to 0xffffffff83da4f80.
+                // That value correspond to `-2_082_844_800u64` which is the difference between the date 1904-01-01 and 1970-01-01 because macOS epoch start at 1904 and not 1970.
+                // https://github.com/macfuse/macfuse/issues/1042
+                _ if self.arg.crtime == 0xffffffff83da4f80 => None,
                 _ => Some(
                     SystemTime::UNIX_EPOCH + Duration::new(self.arg.crtime, self.arg.crtimensec),
                 ),
@@ -490,15 +508,15 @@ mod op {
     pub struct SymLink<'a> {
         header: &'a fuse_in_header,
         target: &'a Path,
-        link: &'a Path,
+        link_name: &'a Path,
     }
     impl_request!(SymLink<'_>);
     impl<'a> SymLink<'a> {
         pub fn target(&self) -> &'a Path {
             self.target
         }
-        pub fn link(&self) -> &'a Path {
-            self.link
+        pub fn link_name(&self) -> &'a Path {
+            self.link_name
         }
     }
 
@@ -860,6 +878,7 @@ mod op {
         GetSize(GetXAttrSize),
         /// User is requesting the data stored in the XAttr.  If the data will fit
         /// in this number of bytes it should be returned, otherwise return [Err(Errno::ERANGE)].
+        #[allow(dead_code)]
         Size(NonZeroU32),
     }
     impl<'a> GetXAttr<'a> {
@@ -894,7 +913,7 @@ mod op {
     }
     impl_request!(ListXAttr<'a>);
     impl<'a> ListXAttr<'a> {
-        /// The size of the buffer the caller has allocated to recieve the list of
+        /// The size of the buffer the caller has allocated to receive the list of
         /// XAttrs.  If this is 0 the user is just probing to find how much space is
         /// required to fit the whole list.
         ///
@@ -965,7 +984,7 @@ mod op {
             super::Version(self.arg.major, self.arg.minor)
         }
 
-        pub fn reply(&self, config: &crate::KernelConfig) -> Response {
+        pub fn reply(&self, config: &crate::KernelConfig) -> Response<'a> {
             let init = fuse_init_out {
                 major: FUSE_KERNEL_VERSION,
                 minor: FUSE_KERNEL_MINOR_VERSION,
@@ -1278,7 +1297,7 @@ mod op {
     }
     impl_request!(Destroy<'a>);
     impl<'a> Destroy<'a> {
-        pub fn reply(&self) -> Response {
+        pub fn reply(&self) -> Response<'a> {
             Response::new_empty()
         }
     }
@@ -1318,7 +1337,7 @@ mod op {
         }
     }
 
-    /// Poll.  TODO: currently unsupported by fuser
+    /// Poll.
     #[cfg(feature = "abi-7-11")]
     #[derive(Debug)]
     pub struct Poll<'a> {
@@ -1333,6 +1352,24 @@ mod op {
         pub fn file_handle(&self) -> FileHandle {
             FileHandle(self.arg.fh)
         }
+
+        /// The unique id used for the poll context by the kernel
+        pub fn kernel_handle(&self) -> u64 {
+            self.arg.kh
+        }
+
+        /// The requested poll events
+        pub fn events(&self) -> u32 {
+            #[cfg(feature = "abi-7-21")]
+            return self.arg.events;
+            #[cfg(not(feature = "abi-7-21"))]
+            return 0;
+        }
+
+        /// The poll request's flags
+        pub fn flags(&self) -> u32 {
+            self.arg.flags
+        }
     }
 
     /// NotifyReply.  TODO: currently unsupported by fuser
@@ -1340,6 +1377,7 @@ mod op {
     #[derive(Debug)]
     pub struct NotifyReply<'a> {
         header: &'a fuse_in_header,
+        #[allow(unused)]
         arg: &'a [u8],
     }
     #[cfg(feature = "abi-7-15")]
@@ -1350,6 +1388,7 @@ mod op {
     #[derive(Debug)]
     pub struct BatchForget<'a> {
         header: &'a fuse_in_header,
+        #[allow(unused)]
         arg: &'a fuse_batch_forget_in,
         nodes: &'a [fuse_forget_one],
     }
@@ -1483,6 +1522,7 @@ mod op {
     }
 
     /// Copy the specified range from the source inode to the destination inode
+    #[cfg(feature = "abi-7-28")]
     #[derive(Debug, Clone, Copy)]
     pub struct CopyFileRangeFile {
         pub inode: INodeNo,
@@ -1587,6 +1627,7 @@ mod op {
     #[derive(Debug)]
     pub struct CuseInit<'a> {
         header: &'a fuse_in_header,
+        #[allow(unused)]
         arg: &'a fuse_init_in,
     }
     #[cfg(feature = "abi-7-12")]
@@ -1614,7 +1655,12 @@ mod op {
                 header,
                 arg: data.fetch()?,
             }),
-            fuse_opcode::FUSE_GETATTR => Operation::GetAttr(GetAttr { header }),
+            fuse_opcode::FUSE_GETATTR => Operation::GetAttr(GetAttr {
+                header,
+
+                #[cfg(feature = "abi-7-9")]
+                arg: data.fetch()?,
+            }),
             fuse_opcode::FUSE_SETATTR => Operation::SetAttr(SetAttr {
                 header,
                 arg: data.fetch()?,
@@ -1622,8 +1668,8 @@ mod op {
             fuse_opcode::FUSE_READLINK => Operation::ReadLink(ReadLink { header }),
             fuse_opcode::FUSE_SYMLINK => Operation::SymLink(SymLink {
                 header,
+                link_name: data.fetch_str()?.as_ref(),
                 target: data.fetch_str()?.as_ref(),
-                link: data.fetch_str()?.as_ref(),
             }),
             fuse_opcode::FUSE_MKNOD => Operation::MkNod(MkNod {
                 header,
@@ -1845,6 +1891,7 @@ pub enum Operation<'a> {
     Forget(Forget<'a>),
     GetAttr(GetAttr<'a>),
     SetAttr(SetAttr<'a>),
+    #[allow(dead_code)]
     ReadLink(ReadLink<'a>),
     SymLink(SymLink<'a>),
     MkNod(MkNod<'a>),
@@ -1856,6 +1903,7 @@ pub enum Operation<'a> {
     Open(Open<'a>),
     Read(Read<'a>),
     Write(Write<'a>),
+    #[allow(dead_code)]
     StatFs(StatFs<'a>),
     Release(Release<'a>),
     FSync(FSync<'a>),
@@ -1882,6 +1930,7 @@ pub enum Operation<'a> {
     #[cfg(feature = "abi-7-11")]
     Poll(Poll<'a>),
     #[cfg(feature = "abi-7-15")]
+    #[allow(dead_code)]
     NotifyReply(NotifyReply<'a>),
     #[cfg(feature = "abi-7-16")]
     BatchForget(BatchForget<'a>),
@@ -1904,6 +1953,7 @@ pub enum Operation<'a> {
     Exchange(Exchange<'a>),
 
     #[cfg(feature = "abi-7-12")]
+    #[allow(dead_code)]
     CuseInit(CuseInit<'a>),
 }
 
@@ -1916,7 +1966,12 @@ impl<'a> fmt::Display for Operation<'a> {
             Operation::SetAttr(x) => x.fmt(f),
             Operation::ReadLink(_) => write!(f, "READLINK"),
             Operation::SymLink(x) => {
-                write!(f, "SYMLINK target {:?}, link {:?}", x.target(), x.link())
+                write!(
+                    f,
+                    "SYMLINK target {:?}, link_name {:?}",
+                    x.target(),
+                    x.link_name()
+                )
             }
             Operation::MkNod(x) => write!(
                 f,
@@ -2114,7 +2169,7 @@ impl<'a> AnyRequest<'a> {
         let opcode = fuse_opcode::try_from(self.header.opcode)
             .map_err(|_: InvalidOpcodeError| RequestError::UnknownOperation(self.header.opcode))?;
         // Parse/check operation arguments
-        op::parse(&self.header, &opcode, self.data).ok_or(RequestError::InsufficientData)
+        op::parse(self.header, &opcode, self.data).ok_or(RequestError::InsufficientData)
     }
 }
 

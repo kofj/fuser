@@ -29,7 +29,7 @@ use std::time::SystemTime;
 use crate::{FileAttr, FileType};
 
 /// Generic reply callback to send data
-pub trait ReplySender: Send + 'static {
+pub trait ReplySender: Send + Sync + Unpin + 'static {
     /// Send data.
     fn send(&self, data: &[IoSlice<'_>]) -> std::io::Result<()>;
 }
@@ -70,7 +70,7 @@ impl Reply for ReplyRaw {
 impl ReplyRaw {
     /// Reply to a request with the given error code and data. Must be called
     /// only once (the `ok` and `error` methods ensure this by consuming `self`)
-    fn send_ll_mut(&mut self, response: &ll::Response) {
+    fn send_ll_mut(&mut self, response: &ll::Response<'_>) {
         assert!(self.sender.is_some());
         let sender = self.sender.take().unwrap();
         let res = response.with_iovec(self.unique, |iov| sender.send(iov));
@@ -78,7 +78,7 @@ impl ReplyRaw {
             error!("Failed to send FUSE reply: {}", err);
         }
     }
-    fn send_ll(mut self, response: &ll::Response) {
+    fn send_ll(mut self, response: &ll::Response<'_>) {
         self.send_ll_mut(response)
     }
 
@@ -148,7 +148,7 @@ impl Reply for ReplyData {
 impl ReplyData {
     /// Reply to a request with the given data
     pub fn data(self, data: &[u8]) {
-        self.reply.send_ll(&ll::Response::new_data(data));
+        self.reply.send_ll(&ll::Response::new_slice(data));
     }
 
     /// Reply to a request with the given error code
@@ -474,6 +474,37 @@ impl ReplyIoctl {
 }
 
 ///
+/// Poll Reply
+///
+#[derive(Debug)]
+#[cfg(feature = "abi-7-11")]
+pub struct ReplyPoll {
+    reply: ReplyRaw,
+}
+
+#[cfg(feature = "abi-7-11")]
+impl Reply for ReplyPoll {
+    fn new<S: ReplySender>(unique: u64, sender: S) -> ReplyPoll {
+        ReplyPoll {
+            reply: Reply::new(unique, sender),
+        }
+    }
+}
+
+#[cfg(feature = "abi-7-11")]
+impl ReplyPoll {
+    /// Reply to a request with the given poll result
+    pub fn poll(self, revents: u32) {
+        self.reply.send_ll(&ll::Response::new_poll(revents))
+    }
+
+    /// Reply to a request with the given error code
+    pub fn error(self, err: c_int) {
+        self.reply.error(err);
+    }
+}
+
+///
 /// Directory reply
 ///
 #[derive(Debug)]
@@ -635,12 +666,12 @@ mod test {
     use super::*;
     use crate::{FileAttr, FileType};
     use std::io::IoSlice;
-    use std::sync::mpsc::{channel, Sender};
+    use std::sync::mpsc::{sync_channel, SyncSender};
     use std::thread;
     use std::time::{Duration, UNIX_EPOCH};
-    use zerocopy::AsBytes;
+    use zerocopy::{Immutable, IntoBytes};
 
-    #[derive(Debug, AsBytes)]
+    #[derive(Debug, IntoBytes, Immutable)]
     #[repr(C)]
     struct Data {
         a: u8,
@@ -1020,13 +1051,6 @@ mod test {
         reply.ok();
     }
 
-    impl super::ReplySender for Sender<()> {
-        fn send(&self, _: &[IoSlice<'_>]) -> std::io::Result<()> {
-            Sender::send(self, ()).unwrap();
-            Ok(())
-        }
-    }
-
     #[test]
     fn reply_xattr_size() {
         let sender = AssertSender {
@@ -1051,9 +1075,16 @@ mod test {
         reply.data(&[0x11, 0x22, 0x33, 0x44]);
     }
 
+    impl super::ReplySender for SyncSender<()> {
+        fn send(&self, _: &[IoSlice<'_>]) -> std::io::Result<()> {
+            self.send(()).unwrap();
+            Ok(())
+        }
+    }
+
     #[test]
     fn async_reply() {
-        let (tx, rx) = channel::<()>();
+        let (tx, rx) = sync_channel::<()>(1);
         let reply: ReplyEmpty = Reply::new(0xdeadbeef, tx);
         thread::spawn(move || {
             reply.ok();

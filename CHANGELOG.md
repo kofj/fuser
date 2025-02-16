@@ -1,6 +1,38 @@
 # FUSE for Rust - Changelog
 
-## 0.10.0 - UNRELEASED
+## 0.15.1 - 2024-11-27
+* Fix crtime related panic that could occur on MacOS. See PR #322 for details.
+
+## 0.15.0 - 2024-10-25
+* Add file handle argument to `getattr()`
+* Change `poll()` to take a `PollHandle` instead of a `u64`
+* Add low level API for manually mounting or wrapping a fuse file descriptor into a `Session`
+* Fix compatibility with MacFUSE 4.x
+* Performance optimizations
+
+## 0.14.0 - 2023-11-04
+* Add support for poll
+* Add support for notifications
+* ABI 7.11 support is now complete
+
+## 0.13.0 - 2023-08-16
+* Remove dependency on `users` crate
+* Performance optimizations
+
+## 0.12.0 - 2022-12-13
+* Add method to `Session` to unmount non-`Send` `Filesystem`s
+
+## 0.11.1 - 2022-08-24
+* Improve an error message when using libfuse2
+
+## 0.11.0 - 2022-03-05
+* Add `spawn_mount2()`
+* Deprecate `spawn_mount()`
+
+## 0.10.0 - 2022-01-06
+* Improve error messages
+* Support compiling with musl
+* Default `link()` & `symlink()` now return EPERM instead of ENOSYS
 
 ## 0.9.1 - 2021-09-07
 * `forget` and `batch_forget` no longer require that `AllowRoot` be set

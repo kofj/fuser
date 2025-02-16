@@ -1,4 +1,4 @@
-FROM ubuntu:20.04
+FROM ubuntu:22.04
 
 ARG DEBIAN_FRONTEND=noninteractive
 
@@ -9,7 +9,9 @@ RUN adduser --disabled-password --gecos '' fsgqa
 
 RUN echo 'user_allow_other' >> /etc/fuse.conf
 
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=1.51.0
+ADD rust-toolchain /code/fuser/rust-toolchain
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain=$(cat /code/fuser/rust-toolchain)
 
 ENV PATH=/root/.cargo/bin:$PATH
 
